@@ -79,6 +79,38 @@ void queue_close(Queue *q){
 } 
 
 
+void handleclient(int cleint_fd){
+
+}
+
+
+void* clientThread(void* arg){
+
+    Queue* q = arg;
+
+    while(true){
+        
+        void* client_ptr = queue_pop(q);
+        if(client_ptr == NULL){
+            return NULL;
+        }
+    
+        int client_fd = *(int *)client_ptr;
+
+        handleclient(client_fd);
+
+        close(client_fd);
+
+        
+    }
+
+    return NULL;
+
+
+}
+
+
+
 
 int main(int argc, char* argv[]){
 
@@ -113,7 +145,7 @@ int main(int argc, char* argv[]){
     if(listen(ServerSocket, 100)==-1){
         perror("Server Failed to Listen");
         return 1;
-    }  //backlog, tells how many connections can wait.
+    }  
 
 
     Queue Q;
@@ -130,10 +162,22 @@ int main(int argc, char* argv[]){
     }
 
 
+    pthread_t threads[4];
+
+    for(int i=0; i<4; i++){
+        int success = pthread_create(&threads[i], NULL, clientThread, &Q);
+        if(success)
+            printf("Successfully Initialized Worker %d", i);
+        else
+            printf("Failed to Initialized Worker %d", i);
+    }
+
 
     struct sockaddr_in client_addr;
     
     while(true){
+
+
 
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(ServerSocket,(struct sockaddr *)&client_addr,&client_len);
@@ -143,17 +187,23 @@ int main(int argc, char* argv[]){
             continue;
         }
 
+        int *client_ptr = malloc(sizeof(int));
+        *client_ptr = client_fd;
+
+        if(queue_push(&Q, client_ptr)==-1){
+            fprintf(stderr,"failed to push Client into Queue with fd: %d", client_fd);
+            continue;
+        };
+
+
+
+    }
+
+
+    for(int i=0; i<4; i++){
+        pthread_join(threads[i], NULL);
     }
     
-
-
-
-
-
-
-
-
-
-
+    
 
 }
