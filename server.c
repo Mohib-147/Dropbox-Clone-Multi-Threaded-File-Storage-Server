@@ -10,6 +10,55 @@
 #include<stdbool.h>
 
 
+
+int send_all(int socket, char* message, size_t len){
+    size_t bytes_sent = 0;
+
+    while(bytes_sent<len){
+        ssize_t sent= send(socket, message + bytes_sent, len - bytes_sent, 0);
+
+        if (sent <= 0) {
+            if (sent < 0 && errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+            bytes_sent += sent;
+    }
+
+    return 0;
+}
+
+int recv_all(int client_fd, char *buffer, size_t capacity)
+{
+    size_t received = 0;
+    char ch;
+
+    while (received < capacity - 1)
+    {
+        ssize_t n = recv(client_fd, &ch, 1, 0);
+
+        if (n == 0)
+            return 1;  
+
+        if (n < 0){
+            if (errno == EINTR)
+                continue;
+
+            return -1;
+        }
+
+        if (ch == '\n')
+            break;
+
+        buffer[received++] = ch;
+    }
+
+    buffer[received] = '\0';
+
+    return 0;
+}
+
 typedef struct {
     void **items; 
     size_t head, tail, count, cap;
@@ -78,11 +127,18 @@ void queue_close(Queue *q){
     
 } 
 
+void handleclient(int client_fd)
+{
+    printf("Connected to client with fd: %d\n\n", client_fd);
 
-void handleclient(int cleint_fd){
+    char buffer[1024] = {0};
 
+    int rc = recv_all(client_fd, buffer, sizeof(buffer)-1);
+    if (rc == -1) { perror("recv failed in handlecleint"); return; }
+    if (rc == 1 && buffer[0] == '\0') { printf("Client %d disconnected\n", client_fd); return; }
+
+    printf("Received from client %d: %s\n", client_fd, buffer);
 }
-
 
 void* clientThread(void* arg){
 
@@ -100,8 +156,7 @@ void* clientThread(void* arg){
         handleclient(client_fd);
 
         close(client_fd);
-
-        
+        free(client_ptr);
     }
 
     return NULL;
@@ -142,10 +197,14 @@ int main(int argc, char* argv[]){
         return 1;
     }
 
+    printf("Server Active on IP 127.0.0.1 Port 8080\n\n");
+
     if(listen(ServerSocket, 100)==-1){
         perror("Server Failed to Listen");
         return 1;
     }  
+
+    printf("Listening for Clients.............\n\n");
 
 
     Queue Q;
@@ -165,11 +224,13 @@ int main(int argc, char* argv[]){
     pthread_t threads[4];
 
     for(int i=0; i<4; i++){
-        int success = pthread_create(&threads[i], NULL, clientThread, &Q);
-        if(success)
-            printf("Successfully Initialized Worker %d", i);
-        else
-            printf("Failed to Initialized Worker %d", i);
+        if(pthread_create(&threads[i], NULL, clientThread, &Q)==0){
+            printf("Successfully Initialized Worker %d\n", i);
+        }
+        else{
+            printf("Failed to Initialized Worker %d\n", i);
+        }
+    
     }
 
 
@@ -192,10 +253,10 @@ int main(int argc, char* argv[]){
 
         if(queue_push(&Q, client_ptr)==-1){
             fprintf(stderr,"failed to push Client into Queue with fd: %d", client_fd);
+                close(client_fd);
+                free(client_ptr);
             continue;
         };
-
-
 
     }
 
