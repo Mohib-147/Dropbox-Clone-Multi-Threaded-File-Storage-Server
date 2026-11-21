@@ -27,26 +27,35 @@ int send_all(int socket, char* message, size_t len){
     return 0;
 }
 
-int recv_all(int client_fd, void *buf, size_t len) {
-    size_t bytes_received = 0;
-    char *ptr = (char *)buf;
+int recv_all(int client_fd, char *buffer, size_t capacity)
+{
+    size_t received = 0;
+    char ch;
 
-    while (bytes_received < len) {
-        ssize_t received = recv(client_fd, ptr + bytes_received, len - bytes_received, 0);
-        if (received == 0) {
-            return 1; 
+    while (received < capacity - 1)
+    {
+        ssize_t n = recv(client_fd, &ch, 1, 0);
+
+        if (n == 0)
+            return 1;  
+
+        if (n < 0){
+            if (errno == EINTR)
+                continue;
+
+            return -1;
         }
-        if (received < 0) {
-            if (errno == EINTR) {
-                continue; 
-            }
-            return -1; 
-        }
-        bytes_received += received;
+
+        if (ch == '\n')
+            break;
+
+        buffer[received++] = ch;
     }
+
+    buffer[received] = '\0';
+
     return 0;
 }
-
 
 
 
