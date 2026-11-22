@@ -7,6 +7,7 @@
 #include <string.h>
 #include <errno.h>
 #include<string.h>
+#include<stdbool.h>
 
 
 int send_all(int socket, char* message, size_t len){
@@ -98,13 +99,25 @@ int main(int argc, char* argv[]){
     printf("Connected to Server with Port %d\n\n", ServerPort);
 
 
-    char message[] = "This Project is just stupid\n";
-    if(send_all(ClientSocket, message, strlen(message))==-1){
-        printf("failed to send message to server\n\n");
+    char message[1024];
+
+    while (true) {
+
+        printf(":> ");
+
+        if (fgets(message, sizeof(message), stdin) == NULL)
+            break;
+
+        if (send_all(ClientSocket, message, strlen(message)) == -1) {
+            printf("Failed to send message to server\n");
+            break;
+        }
+
+        if (strcmp(message, "QUIT\n") == 0 || strcmp(message, "quit\n") == 0) break;
+        
     }
-    else{
-        printf("sucess\n\n");
-    }
+
+
 
     
 

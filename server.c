@@ -92,7 +92,6 @@ int queue_push(Queue *q, void *item){
 
 }
 
-
 void *queue_pop(Queue *q) {
     pthread_mutex_lock(&q->lock);
 
@@ -112,7 +111,6 @@ void *queue_pop(Queue *q) {
     return item;
 }
 
-
 void queue_close(Queue *q){
 
     pthread_mutex_lock(&q->lock);
@@ -127,18 +125,34 @@ void queue_close(Queue *q){
     
 } 
 
-void handleclient(int client_fd)
-{
+
+
+void handleclient(int client_fd){
     printf("Connected to client with fd: %d\n\n", client_fd);
 
-    char buffer[1024] = {0};
+    while(true){
 
-    int rc = recv_all(client_fd, buffer, sizeof(buffer)-1);
-    if (rc == -1) { perror("recv failed in handlecleint"); return; }
-    if (rc == 1 && buffer[0] == '\0') { printf("Client %d disconnected\n", client_fd); return; }
+        char buffer[1024] = {0};
+    
+        int rc = recv_all(client_fd, buffer, sizeof(buffer)-1);
+        if (rc == -1) { perror("recv failed in handlecleint"); return; }
+        if (rc == 1 && buffer[0] == '\0') { printf("Client %d disconnected\n", client_fd); return; }
 
-    printf("Received from client %d: %s\n", client_fd, buffer);
+        if(strcmp(buffer, "quit") == 0 || strcmp(buffer, "Quit")==0) break;
+    
+        printf("Received from client %d: %s\n", client_fd, buffer);
+    }
+
 }
+
+
+
+
+
+
+
+
+
 
 void* clientThread(void* arg){
 
@@ -221,10 +235,10 @@ int main(int argc, char* argv[]){
     }
 
 
-    pthread_t threads[4];
+    pthread_t  clientthreads[4];
 
     for(int i=0; i<4; i++){
-        if(pthread_create(&threads[i], NULL, clientThread, &Q)==0){
+        if(pthread_create(&clientthreads[i], NULL, clientThread, &Q)==0){
             printf("Successfully Initialized Worker %d\n", i);
         }
         else{
@@ -262,7 +276,7 @@ int main(int argc, char* argv[]){
 
 
     for(int i=0; i<4; i++){
-        pthread_join(threads[i], NULL);
+        pthread_join(clientthreads[i], NULL);
     }
     
     
