@@ -180,62 +180,79 @@ void handleclient(int client_fd)
                 continue;
             }
 
-            if(!validate_username(username)){
+            if (!validate_username(username)) {
                 send_response(client_fd, "Wrong Username Format\n");
                 continue;
             }
 
-            if(!validate_password(password)){
+            if (!validate_password(password)) {
                 send_response(client_fd, "Wrong Password Format\n");
                 continue;
             }
 
+            char user_path[64];
+            char identity_path[96];
 
+            snprintf(user_path, sizeof(user_path), "storage/%s", username);
+            snprintf(identity_path, sizeof(identity_path),"%s/identity.txt", user_path);
 
-            int add_status = add_user(username, password);
-
-            if(add_status == 0){
-                send_response(client_fd, "OK signed up\n");
-            }
-            else if(add_status == 1){
+            if (mkdir(user_path, 0755) == -1) {
                 send_response(client_fd, "ERR EXISTS\n");
                 continue;
             }
-            else{
-                send_response(client_fd, "Failed to sign up\n");
-                continue;
-            }
 
-            char user_path[64];
+            FILE *file = fopen(identity_path, "w");
 
-            snprintf(user_path, sizeof(user_path), "storage/%s", username);
-
-            if (mkdir(user_path, 0755) == -1) {
-                perror("mkdir");
-                send_response(client_fd, "Failed to Make your Directory\n");
-                continue;
-            }
-
-            char indentity_path[64];
-            snprintf(indentity_path, sizeof(indentity_path), "storage/%s", "identity.txt");
-
-            FILE *file = fopen(indentity_path, "w");
             if (file == NULL) {
-                perror("Error creating file");
-                send_response(client_fd, "Failed to Make your Identiry.txt\n");
+                perror("fopen");
+
+                rmdir(user_path);
+
+                send_response(client_fd, "ERR INTERNAL\n");
                 continue;
             }
-            size_t used_q=0;
-            size_t q_limit = 0;
-            fprintf(file, "%s\n%s\n%zu\n%zu", username, password, used_q, q_limit);
 
+            size_t used_q = 0;
+            size_t q_limit = 1024 * 1024;
 
+            bool write_failed = false;
 
+            if (fprintf(file, "%s\n%s\n%zu\n%zu",
+                        username, password, used_q, q_limit) < 0) {
+                write_failed = true;
+            }
 
+            if (fclose(file) != 0) {
+                write_failed = true;
+            }
 
+            if (write_failed) {
+                unlink(identity_path);
+                rmdir(user_path);
 
+                send_response(client_fd, "ERR INTERNAL\n");
+                continue;
+            }
 
+            int add_status = add_user(username, password);
 
+            if (add_status != 0) {
+
+                unlink(identity_path);
+                rmdir(user_path);
+
+                if (add_status == 1) {
+                    send_response(client_fd, "ERR EXISTS\n");
+                }
+                else {
+                    send_response(client_fd, "ERR INTERNAL\n");
+                }
+
+                continue;
+            }
+
+            send_response(client_fd, "OK signed up\n");
+            continue;
         }
 
         // LOGIN =================================================
