@@ -8,55 +8,7 @@
 #include <errno.h>
 #include<string.h>
 #include<stdbool.h>
-
-
-int send_all(int socket, char* message, size_t len){
-    size_t bytes_sent = 0;
-
-    while(bytes_sent<len){
-        ssize_t sent= send(socket, message + bytes_sent, len - bytes_sent, 0);
-
-        if (sent <= 0) {
-            if (sent < 0 && errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-            bytes_sent += sent;
-    }
-
-    return 0;
-}
-
-int recv_all(int client_fd, char *buffer, size_t capacity)
-{
-    size_t received = 0;
-    char ch;
-
-    while (received < capacity - 1)
-    {
-        ssize_t n = recv(client_fd, &ch, 1, 0);
-
-        if (n == 0)
-            return 1;  
-
-        if (n < 0){
-            if (errno == EINTR)
-                continue;
-
-            return -1;
-        }
-
-        if (ch == '\n')
-            break;
-
-        buffer[received++] = ch;
-    }
-
-    buffer[received] = '\0';
-
-    return 0;
-}
+#include "include/utils.h"
 
 
 
@@ -100,6 +52,7 @@ int main(int argc, char* argv[]){
 
 
     char message[1024];
+    char response[1024];
 
     while (true) {
 
@@ -113,6 +66,11 @@ int main(int argc, char* argv[]){
             break;
         }
 
+        if(recv_all(ClientSocket, response, sizeof(response))==-1){
+            printf("Failed to recieve message from server\n");
+        }
+        printf("[Server] %s\n", response);
+        
         if (strcmp(message, "QUIT\n") == 0 || strcmp(message, "quit\n") == 0) break;
         
     }

@@ -8,56 +8,9 @@
 #include<errno.h>	
 #include<string.h>	
 #include<stdbool.h>
+#include "include/utils.h"
+#include<sys/stat.h>
 
-
-
-int send_all(int socket, char* message, size_t len){
-    size_t bytes_sent = 0;
-
-    while(bytes_sent<len){
-        ssize_t sent= send(socket, message + bytes_sent, len - bytes_sent, 0);
-
-        if (sent <= 0) {
-            if (sent < 0 && errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-            bytes_sent += sent;
-    }
-
-    return 0;
-}
-
-int recv_all(int client_fd, char *buffer, size_t capacity)
-{
-    size_t received = 0;
-    char ch;
-
-    while (received < capacity - 1)
-    {
-        ssize_t n = recv(client_fd, &ch, 1, 0);
-
-        if (n == 0)
-            return 1;  
-
-        if (n < 0){
-            if (errno == EINTR)
-                continue;
-
-            return -1;
-        }
-
-        if (ch == '\n')
-            break;
-
-        buffer[received++] = ch;
-    }
-
-    buffer[received] = '\0';
-
-    return 0;
-}
 
 typedef struct {
     void **items; 
@@ -127,23 +80,223 @@ void queue_close(Queue *q){
 
 
 
-void handleclient(int client_fd){
-    printf("Connected to client with fd: %d\n\n", client_fd);
+typedef struct {
+    char username[32];
+    char password[128];
 
-    while(true){
+    size_t quota_used;
+    size_t quota_limit;
 
-        char buffer[1024] = {0};
-    
-        int rc = recv_all(client_fd, buffer, sizeof(buffer)-1);
-        if (rc == -1) { perror("recv failed in handlecleint"); return; }
-        if (rc == 1 && buffer[0] == '\0') { printf("Client %d disconnected\n", client_fd); return; }
+} User;
 
-        if(strcmp(buffer, "quit") == 0 || strcmp(buffer, "Quit")==0) break;
-    
-        printf("Received from client %d: %s\n", client_fd, buffer);
+User *users = NULL;
+size_t user_count = 0;
+pthread_mutex_t user_lock;
+
+int add_user(char *username, char *password)
+{
+    pthread_mutex_lock(&user_lock);
+
+    for (size_t i = 0; i < user_count; i++) {
+        if (strcmp(users[i].username, username) == 0) {
+            pthread_mutex_unlock(&user_lock);
+            return 1;  
+        }
     }
 
+    User *temp = realloc(users, (user_count + 1) * sizeof(User));
+
+    if (temp == NULL) {
+        pthread_mutex_unlock(&user_lock);
+        return -1;  
+    }
+
+    users = temp;
+
+    strcpy(users[user_count].username, username);
+    strcpy(users[user_count].password, password);
+
+    users[user_count].quota_used = 0;
+    users[user_count].quota_limit = 1024 * 1024;
+
+    user_count++;
+
+    pthread_mutex_unlock(&user_lock);
+
+    return 0;
 }
+
+
+
+void handleclient(int client_fd)
+{
+    printf("Connected to client with fd: %d\n\n", client_fd);
+
+    bool authenticated = false;
+    char logged_in_user[32] = {0};
+
+    while (true)
+    {
+        char buffer[1024] = {0};
+        int rc = recv_all(client_fd, buffer, sizeof(buffer));
+        if (rc == -1) {
+            perror("recv failed in handleclient");
+            return;
+        }
+        if (rc == 1) {
+            printf("Client %d disconnected\n", client_fd);
+            return;
+        }
+
+        char *saveptr;
+        char *token = strtok_r(buffer, " ", &saveptr);
+
+        if (token == NULL)
+            continue;
+
+        // QUIT =================================================
+        if (strcasecmp(token, "QUIT") == 0) {
+
+            char *extra = strtok_r(NULL, " ", &saveptr);
+
+            if (extra != NULL) {
+                send_response(client_fd, "ERR BADCMD\n");
+                continue;
+            }
+
+            send_response(client_fd, "OK bye\n");
+            break;
+        }
+
+        // SIGNUP ===============================================
+        else if (strcasecmp(token, "SIGNUP") == 0) {
+
+            char *username = strtok_r(NULL, " ", &saveptr);
+            char *password = strtok_r(NULL, " ", &saveptr);
+            char *extra = strtok_r(NULL, " ", &saveptr);
+
+            if (username == NULL || password == NULL || extra != NULL) {
+                send_response(client_fd, "ERR BADCMD\n");
+                continue;
+            }
+
+            if(!validate_username(username)){
+                send_response(client_fd, "Wrong Username Format\n");
+                continue;
+            }
+
+            if(!validate_password(password)){
+                send_response(client_fd, "Wrong Password Format\n");
+                continue;
+            }
+
+
+
+            int add_status = add_user(username, password);
+
+            if(add_status == 0){
+                send_response(client_fd, "OK signed up\n");
+            }
+            else if(add_status == 1){
+                send_response(client_fd, "ERR EXISTS\n");
+                continue;
+            }
+            else{
+                send_response(client_fd, "Failed to sign up\n");
+                continue;
+            }
+
+            char user_path[64];
+
+            snprintf(user_path, sizeof(user_path), "storage/%s", username);
+
+            if (mkdir(user_path, 0755) == -1) {
+                perror("mkdir");
+                send_response(client_fd, "Failed to Make your Directory\n");
+                continue;
+            }
+
+            char indentity_path[64];
+            snprintf(indentity_path, sizeof(indentity_path), "storage/%s", "identity.txt");
+
+            FILE *file = fopen(indentity_path, "w");
+            if (file == NULL) {
+                perror("Error creating file");
+                send_response(client_fd, "Failed to Make your Identiry.txt\n");
+                continue;
+            }
+            size_t used_q=0;
+            size_t q_limit = 0;
+            fprintf(file, "%s\n%s\n%zu\n%zu", username, password, used_q, q_limit);
+
+
+
+
+
+
+
+
+        }
+
+        // LOGIN =================================================
+        else if (strcasecmp(token, "LOGIN") == 0) {
+
+            char *username = strtok_r(NULL, " ", &saveptr);
+            char *password = strtok_r(NULL, " ", &saveptr);
+            char *extra = strtok_r(NULL, " ", &saveptr);
+
+            if (username == NULL || password == NULL || extra != NULL) {
+                send_response(client_fd, "ERR BADCMD\n");
+                continue;
+            }
+
+            if (authenticated) {
+                send_response(client_fd, "ERR AUTH\n");
+                continue;
+            }
+
+            char stored_hash[128] = {0};
+            bool user_found = false;
+
+            pthread_mutex_lock(&user_lock);
+
+            for (size_t i = 0; i < user_count; i++) {
+
+                if (strcmp(users[i].username, username) == 0) {
+                    strcpy(stored_hash, users[i].password);
+                    user_found = true;
+                    break;
+                }
+            }
+
+            pthread_mutex_unlock(&user_lock);
+
+            if (user_found && verify_password(password)) {
+
+                authenticated = true;
+                strcpy(logged_in_user, username);
+
+                send_response(client_fd, "OK logged in\n");
+            }
+            else {
+                send_response(client_fd, "ERR AUTH\n");
+            }
+        }
+
+        else {
+
+            if (!authenticated) {
+                send_response(client_fd, "ERR NOAUTH\n");
+                continue;
+            }
+
+            send_response(client_fd, "ERR BADCMD\n");
+        }
+    }
+
+    return;
+}
+
 
 
 
@@ -180,14 +333,14 @@ void* clientThread(void* arg){
 
 
 
-
 int main(int argc, char* argv[]){
+
+    //=========================================================================Socket Part========================================================
 
     if(argc!=2){
         perror("More than 1 argument provided");
         return 1;
     }
-
 
     int port = atoi(argv[1]);
 
@@ -220,6 +373,11 @@ int main(int argc, char* argv[]){
 
     printf("Listening for Clients.............\n\n");
 
+
+    //==================================================Socket Part==========================================================
+
+
+    
 
     Queue Q;
     Q.cap=10; Q.closed=false; Q.count=0; Q.head=0; Q.tail=0;
