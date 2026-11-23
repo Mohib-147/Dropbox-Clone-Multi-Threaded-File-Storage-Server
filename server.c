@@ -10,6 +10,7 @@
 #include<stdbool.h>
 #include "include/utils.h"
 #include<sys/stat.h>
+#include <dirent.h>
 
 
 typedef struct {
@@ -272,24 +273,21 @@ void handleclient(int client_fd)
                 continue;
             }
 
-            char stored_hash[128] = {0};
             bool user_found = false;
 
             pthread_mutex_lock(&user_lock);
 
             for (size_t i = 0; i < user_count; i++) {
 
-                if (strcmp(users[i].username, username) == 0) {
-                    strcpy(stored_hash, users[i].password);
+                if (strcmp(users[i].username, username) == 0 && strcmp(users[i].password, password)==0) {
                     user_found = true;
                     break;
                 }
             }
-
+            
             pthread_mutex_unlock(&user_lock);
 
-            if (user_found && verify_password(password)) {
-
+            if (user_found) {
                 authenticated = true;
                 strcpy(logged_in_user, username);
 
@@ -298,6 +296,8 @@ void handleclient(int client_fd)
             else {
                 send_response(client_fd, "ERR AUTH\n");
             }
+            
+
         }
 
         else {
@@ -313,15 +313,6 @@ void handleclient(int client_fd)
 
     return;
 }
-
-
-
-
-
-
-
-
-
 
 
 void* clientThread(void* arg){
@@ -349,16 +340,117 @@ void* clientThread(void* arg){
 }
 
 
+int loadUsers()
+{
+    const char *base_path = "storage/";
+
+    DIR *dir = opendir(base_path);
+
+    if (dir == NULL) {
+        if (errno == ENOENT) {
+            return 0;  
+        }
+
+        perror("opendir");
+        return -1;
+    }
+
+    struct dirent *entry;
+    int loaded = 0;
+
+    while ((entry = readdir(dir)) != NULL) {
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char user_path[512];
+
+        snprintf(user_path, sizeof(user_path),"%s%s", base_path, entry->d_name);
+
+        struct stat info;
+
+        if (stat(user_path, &info) == -1 || !S_ISDIR(info.st_mode)) {
+            continue;
+        }
+
+        char identity_path[1024];
+
+        snprintf(identity_path, sizeof(identity_path),"%s/identity.txt", user_path);
+
+        FILE *file = fopen(identity_path, "r");
+
+        if (file == NULL) {
+            fprintf(stderr, "Could not open identity file for %s\n",entry->d_name);
+            continue;
+        }
+
+        char username[32];
+        char password[128];
+
+        size_t used_q;
+        size_t q_limit;
+
+        bool valid = fgets(username, sizeof(username), file) != NULL && fgets(password, sizeof(password), file) != NULL && fscanf(file, "%zu\n%zu", &used_q, &q_limit) == 2;
+
+        fclose(file);
+
+        if (!valid) {
+            fprintf(stderr, "Invalid identity file for %s\n", entry->d_name);
+            continue;
+        }
+
+        username[strcspn(username, "\n")] = '\0';
+        password[strcspn(password, "\n")] = '\0';
+
+        if (!validate_username(username) || !validate_password(password)) { 
+            fprintf(stderr, "Invalid user information for %s\n", entry->d_name);
+            continue;
+        }
+
+        int status = add_user(username, password);
+
+        if (status == -1) {
+            closedir(dir);
+            return -1;
+        }
+
+        if (status == 1) {
+            continue;  
+        }
+
+        pthread_mutex_lock(&user_lock);
+
+        for (size_t i = 0; i < user_count; i++) {
+            if (strcmp(users[i].username, username) == 0) {
+                users[i].quota_used = used_q;
+                users[i].quota_limit = q_limit;
+                break;
+            }
+        }
+
+        pthread_mutex_unlock(&user_lock);
+
+        loaded++;
+    }
+
+    closedir(dir);
+
+    return loaded;
+}
+
 
 int main(int argc, char* argv[]){
 
+    
+    
     //=========================================================================Socket Part========================================================
 
     if(argc!=2){
         perror("More than 1 argument provided");
         return 1;
     }
-
+    
     int port = atoi(argv[1]);
 
     int ServerSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -366,11 +458,11 @@ int main(int argc, char* argv[]){
         perror("Server Socket Creation Failed");
         return 1;
     }
-
+    
     struct sockaddr_in server_addr;
-
+    
     memset(&server_addr, 0, sizeof(server_addr));
-
+    
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = INADDR_ANY;
@@ -380,26 +472,34 @@ int main(int argc, char* argv[]){
         close(ServerSocket);
         return 1;
     }
-
+    
     printf("Server Active on IP 127.0.0.1 Port 8080\n\n");
-
+    
     if(listen(ServerSocket, 100)==-1){
         perror("Server Failed to Listen");
         return 1;
     }  
-
+    
     printf("Listening for Clients.............\n\n");
-
-
+    
+    
     //==================================================Socket Part==========================================================
 
+    printf("Loading Users................\n\n");
 
+    pthread_mutex_init(&user_lock, NULL);
     
+    if (loadUsers() == -1) {
+        fprintf(stderr, "Failed to load users\n");
+        return 1;
+    }
+
+    printf("Loaded %zu users\n", user_count);
 
     Queue Q;
     Q.cap=10; Q.closed=false; Q.count=0; Q.head=0; Q.tail=0;
-    pthread_mutex_init(&Q.lock, NULL);
     pthread_cond_init(&Q.not_empty, NULL);
+    pthread_mutex_init(&Q.lock, NULL);
     pthread_cond_init(&Q.not_full, NULL);
 
     Q.items = malloc(Q.cap * sizeof(void*));
@@ -413,25 +513,20 @@ int main(int argc, char* argv[]){
     pthread_t  clientthreads[4];
 
     for(int i=0; i<4; i++){
-        if(pthread_create(&clientthreads[i], NULL, clientThread, &Q)==0){
-            printf("Successfully Initialized Worker %d\n", i);
+        if(pthread_create(&clientthreads[i], NULL, clientThread, &Q)!=0){
+            printf("Failed to Client Threads %d\n", i);
         }
-        else{
-            printf("Failed to Initialized Worker %d\n", i);
-        }
-    
     }
-
-
+    
     struct sockaddr_in client_addr;
     
     while(true){
-
-
-
+        
+        
+        
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(ServerSocket,(struct sockaddr *)&client_addr,&client_len);
-    
+        
         if(client_fd == -1){
             perror("Failed to Accept client in Server, Trying Again");
             continue;
