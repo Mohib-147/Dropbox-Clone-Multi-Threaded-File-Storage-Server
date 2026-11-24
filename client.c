@@ -114,8 +114,11 @@ int main(int argc, char* argv[]){
                 continue;
             }
 
+            const char *name = strrchr(path, '/');
+            name = (name != NULL) ? name + 1 : path;
+
             char upload_command[1024];
-            snprintf(upload_command, sizeof(upload_command), "UPLOAD %s %ld\n", path, file_size);
+            snprintf(upload_command, sizeof(upload_command), "UPLOAD %s %ld\n", name, file_size);
 
             if (send_all(ClientSocket, upload_command, strlen(upload_command)) == -1) {
                 printf("Failed to send command\n");
@@ -147,6 +150,39 @@ int main(int argc, char* argv[]){
                 break;
             }
             printf("[Server] %s\n", response);
+            continue;
+        }
+        else if (cmd != NULL && strcasecmp(cmd, "LIST") == 0) {
+
+            if (send_all(ClientSocket, message, strlen(message)) == -1) {
+                printf("Failed to send message to server\n");
+                break;
+            }
+
+            if (recv_all(ClientSocket, response, sizeof(response)) != 0) {
+                printf("Server closed connection\n");
+                break;
+            }
+
+            printf("[Server] %s\n", response);
+
+            size_t n = 0;
+            bool disconnected = false;
+
+            if (sscanf(response, "OK %zu", &n) == 1) {
+                for (size_t i = 0; i < n; i++) {
+                    if (recv_all(ClientSocket, response, sizeof(response)) != 0) {
+                        disconnected = true;
+                        break;
+                    }
+                    printf("  %s\n", response);
+                }
+            }
+
+            if (disconnected) {
+                printf("Server closed connection\n");
+                break;
+            }
             continue;
         }
         else{

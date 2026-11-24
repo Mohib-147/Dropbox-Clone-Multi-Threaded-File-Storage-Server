@@ -623,7 +623,55 @@ void handleclient(int client_fd){
             continue;
 
         }
+        // LIST =================================================
+        else if(strcasecmp(token, "LIST")==0){
 
+            if (!authenticated) {
+                send_response(client_fd, "ERR NOAUTH\n");
+                continue;
+            }
+
+            char *extra = strtok_r(NULL, " ", &saveptr);
+
+            if (extra != NULL) {
+                send_response(client_fd, "ERR BADCMD\n");
+                continue;
+            }
+
+            size_t count = 0;
+            char *out = NULL;
+            size_t len = 0;
+
+            pthread_mutex_lock(&user_lock);
+
+            User* usr = find_user(logged_in_user);
+
+            if (usr != NULL) {
+                count = usr->file_count;
+            }
+
+            size_t cap = 32 + count * 96;
+            out = malloc(cap);
+
+            if (out != NULL) {
+                len += (size_t)snprintf(out, cap, "OK %zu\n", count);
+
+                for (size_t i = 0; i < count; i++) {
+                    len += (size_t)snprintf(out + len, cap - len, "%s %zu\n",usr->files[i].filename, usr->files[i].size);
+                }
+            }
+
+            pthread_mutex_unlock(&user_lock); 
+            
+            if (out == NULL) {
+                send_response(client_fd, "ERR INTERNAL\n");
+                continue;
+            }
+
+            send_all(client_fd, out, len);   
+            free(out);
+            continue;
+        }
         else {
 
             if (!authenticated) {
@@ -793,7 +841,7 @@ void handletask(Task *T)
         char path[160];
         snprintf(path, sizeof(path), "storage/%s/%s", T->user, T->filename);
 
-        FILE *f = fopen(path, "wbx");       // 'x': fail if the file already exists
+        FILE *f = fopen(path, "wbx");      
         if (f != NULL) {
             if (fwrite(T->payload, 1, T->payload_len, f) == T->payload_len)
                 status = 0;
@@ -804,7 +852,6 @@ void handletask(Task *T)
         char path[160];
         snprintf(path, sizeof(path), "storage/%s/%s", T->user, T->filename);
 
-        // Already missing on disk counts as deleted, so memory can be cleaned up
         if (unlink(path) == 0 || errno == ENOENT)
             status = 0;
     }
