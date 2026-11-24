@@ -80,7 +80,6 @@ void queue_close(Queue *q){
 } 
 
 
-
 typedef struct {
     char username[32];
     char password[128];
@@ -93,6 +92,9 @@ typedef struct {
 User *users = NULL;
 size_t user_count = 0;
 pthread_mutex_t user_lock;
+
+Queue task_queue;
+
 
 int add_user(char *username, char *password)
 {
@@ -128,13 +130,32 @@ int add_user(char *username, char *password)
 }
 
 
+typedef enum { CMD_UPLOAD, CMD_DOWNLOAD, CMD_DELETE, CMD_LIST } Command;
 
-void handleclient(int client_fd)
-{
+typedef struct  {
+    Command cmd;
+    char user[32];
+    char filename[64];
+    char *payload; /* UPLOAD: bytes read from the socket */
+    size_t payload_len;
+    /* ---- filled in by the worker ---- */
+    int status; /* 0 = ok, otherwise an error code */
+    char *result; /* DOWNLOAD bytes, LIST text */
+    size_t result_len;
+    /* ---- completion signalling: one possible design (Problem 1, option A) ---- */
+    pthread_mutex_t lock;
+    pthread_cond_t done_cv;
+    int done;
+} Task;
+
+
+void handleclient(int client_fd){
     printf("Connected to client with fd: %d\n\n", client_fd);
 
     bool authenticated = false;
     char logged_in_user[32] = {0};
+    size_t user_quota_used = 0;
+    size_t user_maximum_quota = 0;
 
     while (true)
     {
@@ -273,31 +294,144 @@ void handleclient(int client_fd)
                 continue;
             }
 
-            bool user_found = false;
 
             pthread_mutex_lock(&user_lock);
 
             for (size_t i = 0; i < user_count; i++) {
 
                 if (strcmp(users[i].username, username) == 0 && strcmp(users[i].password, password)==0) {
-                    user_found = true;
+                    authenticated = true;
+                    strcpy(logged_in_user, users[i].username);
+                    user_quota_used = users[i].quota_used;
+                    user_maximum_quota = users[i].quota_limit;
+                    send_response(client_fd, "OK logged in\n");
                     break;
                 }
             }
-            
             pthread_mutex_unlock(&user_lock);
 
-            if (user_found) {
-                authenticated = true;
-                strcpy(logged_in_user, username);
-
-                send_response(client_fd, "OK logged in\n");
-            }
-            else {
+            if(!authenticated){
                 send_response(client_fd, "ERR AUTH\n");
             }
-            
 
+        }
+
+        else if (strcasecmp(token, "UPLOAD") == 0) {
+
+            if (!authenticated) {
+                send_response(client_fd, "ERR NOAUTH\n");
+                continue;
+            }
+
+            char *filename = strtok_r(NULL, " ", &saveptr);
+            char *sz       = strtok_r(NULL, " ", &saveptr);
+            char *extra    = strtok_r(NULL, " ", &saveptr);
+
+            if (filename == NULL || sz == NULL || extra != NULL) {
+                send_response(client_fd, "ERR BADCMD\n");
+                continue;
+            }
+
+            if (!validate_filename(filename)) {
+                send_response(client_fd, "ERR BADNAME\n");
+                continue;
+            }
+
+            char *endptr;
+            errno = 0;
+            long size = strtol(sz, &endptr, 10);
+            if (errno != 0 || *endptr != '\0' || size <= 0 || size > MAX_UPLOAD) {
+                send_response(client_fd, "ERR SIZE\n");
+                continue;
+            }
+
+            if (user_quota_used + (size_t)size > user_maximum_quota) {
+                send_response(client_fd, "ERR QUOTA\n");
+                continue;
+            }
+
+            Task *T  = calloc(1, sizeof(Task));
+            char *payload = malloc((size_t)size);
+            if (T == NULL || payload == NULL) {
+                free(T);
+                free(payload);
+                send_response(client_fd, "ERR INTERNAL\n");
+                continue;
+            }
+
+            send_response(client_fd, "OK READY\n");
+
+            int rc = recv_exact(client_fd, payload, (size_t)size);
+            if (rc != 0) {
+                printf("Upload from %s aborted (client %d)\n", logged_in_user, client_fd);
+                free(payload);
+                free(T);
+                return;
+            }
+
+            T->cmd = CMD_UPLOAD;
+            snprintf(T->user, sizeof(T->user), "%s", logged_in_user);
+            snprintf(T->filename, sizeof(T->filename), "%s", filename);
+            T->payload     = payload;
+            T->payload_len = (size_t)size;
+            T->status      = -1;
+            T->result      = NULL;
+            T->result_len  = 0;
+            T->done        = 0;
+            pthread_mutex_init(&T->lock, NULL);
+            pthread_cond_init(&T->done_cv, NULL);
+
+            if (queue_push(&task_queue, T) != 0) {          
+                pthread_mutex_destroy(&T->lock);
+                pthread_cond_destroy(&T->done_cv);
+                free(T->payload);
+                free(T);
+                send_response(client_fd, "ERR INTERNAL\n");
+                continue;
+            }
+
+            pthread_mutex_lock(&T->lock);
+            while (!T->done){
+                pthread_cond_wait(&T->done_cv, &T->lock);
+            }
+            pthread_mutex_unlock(&T->lock);
+
+            if (T->status == 0) {
+                user_quota_used += (size_t)size;
+
+                pthread_mutex_lock(&user_lock);
+                for (size_t i = 0; i < user_count; i++) {
+                    if (strcmp(users[i].username, logged_in_user) == 0) {
+                        users[i].quota_used = user_quota_used;
+
+                        char id_path[96];
+                        snprintf(id_path, sizeof(id_path), "storage/%s/identity.txt", logged_in_user);
+                        FILE *idf = fopen(id_path, "w");
+                        if (idf != NULL) {
+                            fprintf(idf, "%s\n%s\n%zu\n%zu", users[i].username, users[i].password,
+                                    users[i].quota_used, users[i].quota_limit);
+                            fclose(idf);
+                        }
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&user_lock);
+
+                send_response(client_fd, "OK uploaded\n");
+            }
+            else if (T->status == 2) {
+                send_response(client_fd, "ERR QUOTA\n");
+            }
+            else {
+                send_response(client_fd, "ERR INTERNAL\n");
+            }
+
+            pthread_mutex_destroy(&T->lock);
+            pthread_cond_destroy(&T->done_cv);
+            free(T->payload);
+            free(T->result);
+            free(T);
+            continue;
         }
 
         else {
@@ -440,12 +574,85 @@ int loadUsers()
 }
 
 
+
+
+
+
+
+
+void handletask(Task *T)
+{
+    int status = -1;
+
+    if (T->cmd == CMD_UPLOAD) {
+        char path[160];
+        snprintf(path, sizeof(path), "storage/%s/%s", T->user, T->filename);
+
+        FILE *f = fopen(path, "wb");
+        if (f != NULL) {
+            if (fwrite(T->payload, 1, T->payload_len, f) == T->payload_len)
+                status = 0;
+            fclose(f);
+        }
+    }
+
+    pthread_mutex_lock(&T->lock);
+    T->status = status;
+    T->done = 1;
+    pthread_cond_signal(&T->done_cv);
+    pthread_mutex_unlock(&T->lock);
+}
+
+
+
+
+void* taskThread(void* arg) {
+
+    Queue* q = arg;
+
+    while (true) {
+
+        Task *T = queue_pop(q);
+
+        if (T == NULL) {
+            return NULL;
+        }
+
+        handletask(T);
+    }
+
+    return NULL;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 int main(int argc, char* argv[]){
 
     
     
     //=========================================================================Socket Part========================================================
-
     if(argc!=2){
         perror("More than 1 argument provided");
         return 1;
@@ -481,10 +688,18 @@ int main(int argc, char* argv[]){
     }  
     
     printf("Listening for Clients.............\n\n");
-    
-    
     //==================================================Socket Part==========================================================
 
+
+
+
+
+
+
+
+
+
+    //=========================================================USER + Client handeling===================================================
     printf("Loading Users................\n\n");
 
     pthread_mutex_init(&user_lock, NULL);
@@ -496,16 +711,16 @@ int main(int argc, char* argv[]){
 
     printf("Loaded %zu users\n", user_count);
 
-    Queue Q;
-    Q.cap=10; Q.closed=false; Q.count=0; Q.head=0; Q.tail=0;
-    pthread_cond_init(&Q.not_empty, NULL);
-    pthread_mutex_init(&Q.lock, NULL);
-    pthread_cond_init(&Q.not_full, NULL);
+    Queue client_queue;
+    client_queue.cap=10; client_queue.closed=false; client_queue.count=0; client_queue.head=0; client_queue.tail=0;
+    pthread_cond_init(&client_queue.not_empty, NULL);
+    pthread_mutex_init(&client_queue.lock, NULL);
+    pthread_cond_init(&client_queue.not_full, NULL);
 
-    Q.items = malloc(Q.cap * sizeof(void*));
+    client_queue.items = malloc(client_queue.cap * sizeof(void*));
 
-    if(Q.items==NULL){
-        perror("Failed to Assign memory to Q.items");
+    if(client_queue.items==NULL){
+        perror("Failed to Assign memory to client_queue.items");
         return 1;
     }
 
@@ -513,13 +728,41 @@ int main(int argc, char* argv[]){
     pthread_t  clientthreads[4];
 
     for(int i=0; i<4; i++){
-        if(pthread_create(&clientthreads[i], NULL, clientThread, &Q)!=0){
+        if(pthread_create(&clientthreads[i], NULL, clientThread, &client_queue)!=0){
             printf("Failed to Client Threads %d\n", i);
         }
     }
     
-    struct sockaddr_in client_addr;
+    //=========================================================USER + Client handeling===========================================================
     
+
+
+
+
+    //=========================================================Task handeling===========================================================
+    task_queue.cap=20; task_queue.closed=false; task_queue.count=0; task_queue.head=0; task_queue.tail=0;
+    pthread_cond_init(&task_queue.not_empty, NULL);
+    pthread_mutex_init(&task_queue.lock, NULL);
+    pthread_cond_init(&task_queue.not_full, NULL);
+    
+    task_queue.items = malloc(task_queue.cap * sizeof(void*));
+
+    if(task_queue.items==NULL){
+        perror("Failed to Assign memory to task_queue.items");
+        return 1;
+    }
+
+    pthread_t  taskthreads[4];
+    for(int i=0; i<4; i++){
+        if(pthread_create(&taskthreads[i], NULL, taskThread, &task_queue)!=0){
+            printf("Failed to Client Threads %d\n", i);
+        }
+    }   
+    //=========================================================Task handeling===========================================================
+
+    
+    struct sockaddr_in client_addr;
+
     while(true){
         
         
@@ -535,7 +778,7 @@ int main(int argc, char* argv[]){
         int *client_ptr = malloc(sizeof(int));
         *client_ptr = client_fd;
 
-        if(queue_push(&Q, client_ptr)==-1){
+        if(queue_push(&client_queue, client_ptr)==-1){
             fprintf(stderr,"failed to push Client into Queue with fd: %d", client_fd);
                 close(client_fd);
                 free(client_ptr);

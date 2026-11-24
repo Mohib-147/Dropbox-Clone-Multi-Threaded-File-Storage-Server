@@ -51,6 +51,21 @@ int recv_all(int client_fd, char *buffer, size_t capacity)
     return 0;
 }
 
+
+int recv_exact(int fd, char *buf, size_t len){
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = recv(fd, buf + got, len - got, 0);
+        if (n == 0) return 1;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        got += (size_t)n;
+    }
+    return 0;
+}
+
 void send_response(int client_fd, char *message){
     send_all(client_fd, message, strlen(message));
 }
@@ -98,6 +113,28 @@ bool validate_password(char *password){
 
 bool verify_password(const char *password){
     (void)password;
+    return true;
+}
+
+
+bool validate_filename(char *filename)
+{
+    size_t len = strlen(filename);
+
+    if (len == 0 || len > 63)
+        return false;
+
+    if (strstr(filename, "..") != NULL)
+        return false;
+
+    for (size_t i = 0; i < len; i++) {
+        char c = filename[i];
+
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) {
+            return false;
+        }
+    }
+
     return true;
 }
 

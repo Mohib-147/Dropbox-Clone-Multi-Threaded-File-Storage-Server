@@ -13,14 +13,17 @@
 #include<stdbool.h>
 #include<ctype.h>
 
+#define MAX_UPLOAD (256 * 1024)
+
 
 int send_all(int socket, char* message, size_t len);
 int recv_all(int client_fd, char *buffer, size_t capacity);
+int recv_exact(int fd, char *buf, size_t len);
 void send_response(int client_fd, char *message);
 
 bool validate_username(char *username);
 bool validate_password(char *password);
-//bool validate_filename(const char *filename);
+bool validate_filename(char *filename);
 
 bool verify_password(const char *password);
 
