@@ -117,8 +117,7 @@ bool verify_password(const char *password){
 }
 
 
-bool validate_filename(char *filename)
-{
+bool validate_filename(char *filename){
     size_t len = strlen(filename);
 
     if (len == 0 || len > 63)
@@ -130,9 +129,9 @@ bool validate_filename(char *filename)
     for (size_t i = 0; i < len; i++) {
         char c = filename[i];
 
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
             return false;
-        }
+        
     }
 
     return true;
