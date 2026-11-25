@@ -672,6 +672,97 @@ void handleclient(int client_fd){
             free(out);
             continue;
         }
+        
+        
+        else if(strcasecmp(token, "DOWNLOAD")==0){
+
+            if (!authenticated) {
+                send_response(client_fd, "ERR NOAUTH\n");
+                continue;
+            }
+
+            char *filename = strtok_r(NULL, " ", &saveptr);
+            char *extra    = strtok_r(NULL, " ", &saveptr);
+
+            if (filename == NULL || extra != NULL) {
+                send_response(client_fd, "ERR BADCMD\n");
+                continue;
+            }
+
+            if (!validate_filename(filename)) {
+                send_response(client_fd, "ERR NOTFOUND\n");
+                continue;
+            }
+
+            bool found = false;
+
+            pthread_mutex_lock(&user_lock);
+            User *u = find_user(logged_in_user);
+            if (u != NULL) {
+                found = (find_file(u, filename) != -1);
+            }
+            pthread_mutex_unlock(&user_lock);
+
+            if (!found) {
+                send_response(client_fd, "ERR NOTFOUND\n");
+                continue;
+            }
+
+            Task *T  = calloc(1, sizeof(Task));
+            if (T == NULL) {
+                send_response(client_fd, "ERR INTERNAL\n");
+                continue;
+            }
+
+            T->cmd = CMD_DOWNLOAD;
+            snprintf(T->user, sizeof(T->user), "%s", logged_in_user);
+            snprintf(T->filename, sizeof(T->filename), "%s", filename);
+            T->payload  = NULL;
+            T->payload_len = 0;
+            T->status = -1;
+            T->result = NULL;
+            T->result_len = 0;
+            T->done = 0;
+            pthread_mutex_init(&T->lock, NULL);
+            pthread_cond_init(&T->done_cv, NULL);
+
+            if (queue_push(&task_queue, T) != 0) {
+                pthread_mutex_destroy(&T->lock);
+                pthread_cond_destroy(&T->done_cv);
+                free(T);
+                send_response(client_fd, "ERR INTERNAL\n");
+                continue;
+            }
+
+            pthread_mutex_lock(&T->lock);
+            while (!T->done){
+                pthread_cond_wait(&T->done_cv, &T->lock);
+            }
+            pthread_mutex_unlock(&T->lock);
+
+            if (T->status == 0) {
+                char header[64];
+                snprintf(header, sizeof(header), "OK %zu\n", T->result_len);
+
+                send_response(client_fd, header);
+                send_all(client_fd, T->result, T->result_len);
+            }
+            else if (T->status == 1) {
+                send_response(client_fd, "ERR NOTFOUND\n");
+            }
+            else {
+                send_response(client_fd, "ERR INTERNAL\n");
+            }
+
+            pthread_mutex_destroy(&T->lock);
+            pthread_cond_destroy(&T->done_cv);
+            free(T->result);
+            free(T);
+            continue;
+        }
+
+        
+        
         else {
 
             if (!authenticated) {
@@ -765,7 +856,6 @@ int loadUsers()
 
         bool valid = fgets(username, sizeof(username), file) != NULL && fgets(password, sizeof(password), file) != NULL && fscanf(file, "%zu\n%zu", &used_q, &q_limit) == 2;
 
-        // File stays open: the file list comes after the header
         if (!valid) {
             fprintf(stderr, "Invalid identity file for %s\n", entry->d_name);
             fclose(file);
@@ -802,7 +892,6 @@ int loadUsers()
             u->quota_used = used_q;
             u->quota_limit = q_limit;
 
-            // Remaining lines: "<filename> <size>"
             char fname[64];
             size_t fsize;
 
@@ -855,6 +944,37 @@ void handletask(Task *T)
         if (unlink(path) == 0 || errno == ENOENT)
             status = 0;
     }
+
+    else if(T->cmd == CMD_DOWNLOAD){
+        char path[160];
+        snprintf(path, sizeof(path), "storage/%s/%s", T->user, T->filename);
+
+        FILE *f = fopen(path, "rb");
+
+        if (f == NULL) {
+            status = (errno == ENOENT) ? 1 : -1;
+        }
+        else {
+            long size = -1;
+
+            if (fseek(f, 0, SEEK_END) == 0) {
+                size = ftell(f);
+                rewind(f);
+            }
+
+            if (size >= 0) {
+                T->result = malloc(size > 0 ? (size_t)size : 1);
+
+                if (T->result != NULL && fread(T->result, 1, (size_t)size, f) == (size_t)size) {
+                    T->result_len = (size_t)size;
+                    status = 0;
+                }
+            }
+
+            fclose(f);
+        }
+    }
+
 
     pthread_mutex_lock(&T->lock);
     T->status = status;

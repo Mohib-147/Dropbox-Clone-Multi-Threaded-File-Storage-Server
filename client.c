@@ -73,7 +73,7 @@ int main(int argc, char* argv[]){
             char *extra = strtok_r(NULL, " \n", &saveptr);
 
             if (path == NULL || extra != NULL) {
-                printf("Usage: UPLOAD <filename>\n");
+                printf("Formate: UPLOAD <filename>\n");
                 continue;
             }
 
@@ -183,6 +183,66 @@ int main(int argc, char* argv[]){
                 printf("Server closed connection\n");
                 break;
             }
+            continue;
+        }
+        else if (cmd != NULL && strcasecmp(cmd, "DOWNLOAD") == 0) {
+
+            char *filename = strtok_r(NULL, " \n", &saveptr);
+            char *extra    = strtok_r(NULL, " \n", &saveptr);
+
+            if (filename == NULL || extra != NULL) {
+                printf("Formate: DOWNLOAD <filename>\n");
+                continue;
+            }
+
+            if (send_all(ClientSocket, message, strlen(message)) == -1) {
+                printf("Failed to send message to server\n");
+                break;
+            }
+
+            if (recv_all(ClientSocket, response, sizeof(response)) != 0) {
+                printf("Server closed connection\n");
+                break;
+            }
+
+            size_t size;
+
+            if (sscanf(response, "OK %zu", &size) != 1) {
+                printf("[Server] %s\n", response);
+                continue;
+            }
+
+            char *data = malloc(size > 0 ? size : 1);
+
+            if (data == NULL) {
+                printf("Out of memory, closing connection\n");
+                break;
+            }
+
+            if (recv_exact(ClientSocket, data, size) != 0) {
+                printf("Server closed connection\n");
+                free(data);
+                break;
+            }
+
+            FILE *file = fopen(filename, "wb");
+
+            if (file == NULL) {
+                perror("Could not create file");
+                free(data);
+                continue;
+            }
+
+            if (fwrite(data, 1, size, file) != size) {
+                printf("Failed to write file\n");
+            }
+            else {
+                printf("[Server] OK %zu\n", size);
+                printf("Saved %s (%zu bytes)\n", filename, size);
+            }
+
+            fclose(file);
+            free(data);
             continue;
         }
         else{
